@@ -1,0 +1,114 @@
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: notes_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: notes_db
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_USER: notes_user
+      MYSQL_PASSWORD: notes_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - notes_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Laravel Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: notes_backend
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - ./backend:/var/www/html
+      # Don't override vendor - let it be installed in container
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: notes_db
+      DB_USERNAME: notes_user
+      DB_PASSWORD: notes_password
+      APP_ENV: local
+      APP_DEBUG: true
+      APP_URL: http://localhost:8000
+    networks:
+      - notes_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/notes"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command: >
+      sh -c "
+        echo 'Waiting for MySQL to be ready...' &&
+        timeout=60 &&
+        while [ $$timeout -gt 0 ] && ! nc -z mysql 3306; do
+          sleep 1 &&
+          timeout=$$((timeout-1))
+        done &&
+        echo 'MySQL is ready!' &&
+        echo 'Setting up Laravel application...' &&
+        if [ ! -f .env ]; then
+          echo 'Creating .env file from .env.example...' &&
+          cp .env.example .env &&
+          php artisan key:generate --force
+        fi &&
+        echo 'Installing Composer dependencies...' &&
+        if [ ! -d vendor ] || [ ! -f vendor/autoload.php ]; then
+          composer install --no-interaction --prefer-dist --no-dev
+        fi &&
+        echo 'Running database migrations...' &&
+        php artisan migrate --force || echo 'Migration completed or skipped' &&
+        echo 'Generating Swagger documentation...' &&
+        php artisan l5-swagger:generate || echo 'Swagger generation skipped' &&
+        echo 'Starting Laravel server...' &&
+        exec php artisan serve --host=0.0.0.0 --port=8000
+      "
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: notes_frontend
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000/api
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    depends_on:
+      - backend
+    networks:
+      - notes_network
+    stdin_open: true
+    tty: true
+
+volumes:
+  mysql_data:
+  backend_vendor:
+
+networks:
+  notes_network:
+    driver: bridge
